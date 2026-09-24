@@ -24,7 +24,12 @@ func (h hostRewriter) RoundTrip(req *http.Request) (*http.Response, error) {
 	r.URL.Scheme = h.target.Scheme
 	r.URL.Host = h.target.Host
 	r.Host = h.target.Host
-	return http.DefaultTransport.RoundTrip(r)
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if resp != nil {
+		// Report the original URL so colly resolves links against javten.com.
+		resp.Request = req
+	}
+	return resp, err
 }
 
 func newFixtureProvider(t *testing.T, handler http.HandlerFunc) (*FC2HUB, func() []string) {
@@ -126,8 +131,8 @@ func TestGetMovieInfoByURL_LDJSONFlexibleFields(t *testing.T) {
 	assert.Equal(t, "FC2-4438561", info.Number)
 	assert.Equal(t, "LD JSON Title", info.Title)
 	assert.Equal(t, "https://javten.com/img/c.jpg", info.CoverURL)
-	assert.Equal(t, []string{"Mio"}, info.Actors)
-	assert.Equal(t, []string{"Amateur"}, info.Genres)
+	assert.Equal(t, []string{"Mio"}, []string(info.Actors))
+	assert.Equal(t, []string{"Amateur"}, []string(info.Genres))
 	assert.Equal(t, "Seller", info.Maker)
 	assert.Equal(t, "https://javten.com/video/1818987/id4438561/LD%20JSON%20Title", info.Homepage)
 }
