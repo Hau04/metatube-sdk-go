@@ -155,40 +155,84 @@ func (fc2ppvdb *FC2PPVDB) GetMovieInfoByURL(rawURL string) (info *model.MovieInf
 	return parsedInfo, nil
 }
 
-// extractDataPage returns the JSON document stored in the "data-page" HTML
-// attribute of the Inertia app root element.
+// jsonObject returns s without surrounding whitespace when it is a valid JSON
+// object literal, and reports whether it qualifies.
 //
-// A page can carry more than one element with a data-page attribute: the
-// production layout also sets <body data-page="articles.show">, whose value is
-// the Laravel route name rather than JSON. Matching the first element in
-// document order therefore yields "articles.show", which json.Unmarshal
-// rejects with "invalid character 'a' looking for beginning of value". The
-// Inertia page state always lives on the #app root element, so that element is
-// preferred, and any data-page value that is not a JSON object is skipped.
+// Validating with json.Valid is what makes the data-page search below safe:
+// candidates that are only *shaped* like JSON (a route name, an element id
+// such as "app", or a large DOM subtree that merely starts with "{") are
+// rejected instead of being handed to json.Unmarshal.
+func jsonObject(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "{") || !json.Valid([]byte(s)) {
+		return "", false
+	}
+	return s, true
+}
+
+// extractDataPage returns the JSON document describing the current Inertia.js
+// page state.
+//
+// fc2cmadb.com is a Laravel + Inertia application whose embed layout has
+// changed over time, so several carriers must be considered:
+//
+//	Inertia v1: <div id="app" data-page="{&quot;component&quot;:...}">
+//	Inertia v2: <script data-page="app" type="application/json">{...}</script>
+//
+// In v1 the state is the (HTML-escaped) data-page *attribute* value. In v2 it
+// moved into the *text content* of the script element, and the data-page
+// attribute itself now only holds the element id ("app"). A page can also
+// carry unrelated data-page attributes such as <body data-page="articles.show">,
+// whose value is a Laravel route name rather than JSON.
+//
+// Matching the first element in document order therefore yields a non-JSON
+// string, and reading only attribute values misses the v2 layout entirely:
+// both produced "invalid character 'a' looking for beginning of value" or a
+// spurious "not found" for a perfectly valid page. Every candidate is
+// validated with jsonObject so the first genuine JSON object wins regardless
+// of layout or document order.
 func extractDataPage(body []byte) (string, error) {
-	node, err := htmlquery.Parse(bytes.NewReader(body))
+	doc, err := htmlquery.Parse(bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("fc2ppvdb: failed to parse HTML: %w", err)
 	}
-	// Preferred: the Inertia app root element.
-	if e, err := htmlquery.Query(node, "//*[@id='app'][@data-page]"); err == nil && e != nil {
-		if val := strings.TrimSpace(htmlquery.SelectAttr(e, "data-page")); strings.HasPrefix(val, "{") {
+
+	// Inertia v1: state in the data-page attribute of the #app root element.
+	if e, err := htmlquery.Query(doc, "//*[@id='app'][@data-page]"); err == nil && e != nil {
+		if val, ok := jsonObject(htmlquery.SelectAttr(e, "data-page")); ok {
 			return val, nil
 		}
 	}
-	// Fallback: any element whose data-page value is a JSON object, in case
-	// the app root is renamed but the page state is still embedded.
-	nodes, err := htmlquery.QueryAll(node, "//*[@data-page]")
+
+	// Inertia v2: state in the text content of a <script data-page="app">.
+	// Checked before the generic sweep because a script's text is the whole
+	// page state, whereas a generic element's text is rendered markup.
+	if nodes, err := htmlquery.QueryAll(doc, "//script[@data-page]"); err == nil {
+		for _, n := range nodes {
+			if val, ok := jsonObject(htmlquery.InnerText(n)); ok {
+				return val, nil
+			}
+		}
+	}
+
+	// Fallbacks, for layout changes that rename the app root or move the
+	// state to a different element. Attribute values are preferred over text
+	// content because they cannot be polluted by surrounding markup.
+	nodes, err := htmlquery.QueryAll(doc, "//*[@data-page]")
 	if err != nil {
 		return "", fmt.Errorf("fc2ppvdb: invalid XPath expression: %w", err)
 	}
 	for _, n := range nodes {
-		val := strings.TrimSpace(htmlquery.SelectAttr(n, "data-page"))
-		if strings.HasPrefix(val, "{") {
+		if val, ok := jsonObject(htmlquery.SelectAttr(n, "data-page")); ok {
 			return val, nil
 		}
 	}
-	return "", fmt.Errorf("fc2ppvdb: data-page JSON attribute not found (site layout changed or bot challenge page)")
+	for _, n := range nodes {
+		if val, ok := jsonObject(htmlquery.InnerText(n)); ok {
+			return val, nil
+		}
+	}
+	return "", fmt.Errorf("fc2ppvdb: Inertia page state not found in the document (site layout changed or bot challenge page)")
 }
 
 // buildMovieInfo maps the Inertia page state to a *model.MovieInfo.

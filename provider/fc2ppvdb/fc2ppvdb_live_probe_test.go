@@ -41,21 +41,34 @@ func TestFC2PPVDB_LiveProbe(t *testing.T) {
 		resp.Header.Get("Server"), resp.Header.Get("CF-Ray"))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// Extract the data-page attribute (HTML-escaped JSON). Since the JSON is
-	// HTML-escaped (&quot;), there are no raw double quotes inside the value,
-	// so a plain [^"]* match is safe. The live page carries several data-page
-	// attributes (<body> holds the Laravel route name), so keep the first
-	// value that is a JSON object.
-	matches := regexp.MustCompile(`data-page="([^"]*)"`).FindAllSubmatch(body, -1)
-	require.NotEmpty(t, matches, "data-page attribute not found in live page")
+	// Locate the Inertia page state. Two layouts must be handled:
+	//
+	//	Inertia v1: <div id="app" data-page="{&quot;component&quot;:...}">
+	//	Inertia v2: <script data-page="app" type="application/json">{...}</script>
+	//
+	// In v1 the JSON is the HTML-escaped data-page attribute value; because it
+	// is escaped, a plain [^"]* match is safe. In v2 it is the raw text content
+	// of the script element and the data-page attribute only holds "app".
+	// Neither layout may be matched by position: the live page also carries
+	// <body data-page="articles.show">, whose value is a Laravel route name.
 	var dataPage string
-	for _, m := range matches {
-		if v := strings.ReplaceAll(string(m[1]), "&quot;", `"`); strings.HasPrefix(v, "{") {
+	if m := regexp.MustCompile(`(?s)<script[^>]*data-page="[^"]*"[^>]*>(.*?)</script>`).
+		FindSubmatch(body); len(m) == 2 {
+		if v := strings.TrimSpace(string(m[1])); strings.HasPrefix(v, "{") && json.Valid([]byte(v)) {
 			dataPage = v
-			break
+			t.Logf("page state found in <script data-page> text content (Inertia v2)")
 		}
 	}
-	require.NotEmpty(t, dataPage, "no JSON data-page attribute found in live page")
+	if dataPage == "" {
+		for _, m := range regexp.MustCompile(`data-page="([^"]*)"`).FindAllSubmatch(body, -1) {
+			if v := strings.ReplaceAll(string(m[1]), "&quot;", `"`); strings.HasPrefix(v, "{") {
+				dataPage = v
+				t.Logf("page state found in a data-page attribute (Inertia v1)")
+				break
+			}
+		}
+	}
+	require.NotEmpty(t, dataPage, "no JSON page state found in live page")
 	t.Logf("data-page size=%d", len(dataPage))
 
 	var raw struct {
