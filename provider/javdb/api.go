@@ -372,7 +372,7 @@ func rewriteMovieImages(m *apiMovie) {
 		return
 	}
 	m.CoverURL = rewriteImageURL(m.CoverURL)
-	m.ThumbURL = rewriteImageURL(m.ThumbURL)
+	m.ThumbURL = posterURL(rewriteImageURL(m.ThumbURL), m.CoverURL)
 	for i, raw := range m.PreviewImages {
 		m.PreviewImages[i] = rewriteImageURL(raw)
 	}
@@ -385,7 +385,16 @@ func rewriteMovieImages(m *apiMovie) {
 //
 // Already-plain URLs (https://c0.jdbstatic.com/covers/...) are left unchanged,
 // as are empty values and strings that are not URLs.
+//
+// A /small_covers/ directory is then mapped to /thumbs/, because the plain CDN
+// answers small_covers with 403 while the same still is published as a thumb.
 func rewriteImageURL(raw string) string {
+	return smallCoverToThumb(decryptImageURL(raw))
+}
+
+// decryptImageURL maps an encrypted app CDN URL onto the cached
+// web_image_prefix and leaves every other value unchanged (trimmed).
+func decryptImageURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
