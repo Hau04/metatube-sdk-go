@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"sync"
@@ -18,6 +19,13 @@ import (
 
 	"github.com/metatube-community/metatube-sdk-go/provider"
 )
+
+func TestMain(m *testing.M) {
+	// Keep rewrites off the network for the whole package. Tests that need a
+	// cold cache clear it themselves.
+	setWebImagePrefix(fallbackWebImagePrefix)
+	os.Exit(m.Run())
+}
 
 // detailFixture mirrors a GET /api/v4/movies/82BkzE response: actors and tags
 // are objects carrying a "name", duration and score are numbers, and unset
@@ -123,9 +131,11 @@ const errFixture = `{"success": 0, "action": "InvalidSignature", "message": "Inv
 // actually sent. Recorded state is mutex-guarded because the handler runs on
 // the server's goroutine while the test goroutine reads it back.
 type apiStub struct {
-	search       string
-	detail       string
-	detailStatus int
+	search        string
+	detail        string
+	startup       string
+	detailStatus  int
+	startupStatus int
 
 	mu      sync.Mutex
 	paths   []string
@@ -621,4 +631,247 @@ func TestProviderMetadata(t *testing.T) {
 	assert.Equal(t, "https://javdb.com/", p.URL().String())
 	// 994 is the tier JavDB shares with JAV321; changing it reorders both.
 	assert.EqualValues(t, 994, Priority)
+}
+
+// isolateWebImagePrefix restores the process-wide prefix cache when the test
+// ends, including on failure.
+func isolateWebImagePrefix(t *testing.T) {
+	t.Helper()
+	webImageMu.Lock()
+	prefix, expires := webImagePrefix, webImageExpires
+	webImageMu.Unlock()
+	t.Cleanup(func() {
+		webImageMu.Lock()
+		webImagePrefix, webImageExpires = prefix, expires
+		webImageMu.Unlock()
+	})
+}
+
+func TestRewriteImageURL(t *testing.T) {
+	isolateWebImagePrefix(t)
+	// Trailing slash must not produce a double slash in the result.
+	setWebImagePrefix("https://c0.jdbstatic.com/")
+
+	for name, tt := range map[string]struct{ in, want string }{
+		"encrypted cmastd cover": {
+			"https://tp-iu.cmastd.com/rhe951l4q/covers/zb/ZbX7.jpg",
+			"https://c0.jdbstatic.com/covers/zb/ZbX7.jpg",
+		},
+		"encrypted small cover": {
+			"https://tp-iu.cmastd.com/rhe951l4q/small_covers/5e/5EpYBB.jpg",
+			"https://c0.jdbstatic.com/small_covers/5e/5EpYBB.jpg",
+		},
+		"cmastd host without token": {
+			"https://cmastd.com/covers/zb/ZbX7.jpg",
+			"https://c0.jdbstatic.com/covers/zb/ZbX7.jpg",
+		},
+		"cmastd subdomain": {
+			"https://CDN.cmastd.com/token99/thumbs/ab/Ab.jpg",
+			"https://c0.jdbstatic.com/thumbs/ab/Ab.jpg",
+		},
+		"later cdn host": {
+			"https://tp.spfcas.com/rhe951l4q/avatars/83/83V.jpg",
+			"https://c0.jdbstatic.com/avatars/83/83V.jpg",
+		},
+		"known token outside media dirs": {
+			"https://tp.spfcas.com/rhe951l4q/images/c.jpg",
+			"https://c0.jdbstatic.com/images/c.jpg",
+		},
+		"query dropped": {
+			"https://tp-iu.cmastd.com/rhe951l4q/samples/zb/ZbX7.jpg?sign=abc",
+			"https://c0.jdbstatic.com/samples/zb/ZbX7.jpg",
+		},
+		"plain jdbstatic": {
+			"https://c0.jdbstatic.com/covers/82/82BkzE.jpg",
+			"https://c0.jdbstatic.com/covers/82/82BkzE.jpg",
+		},
+		"plain other jdbstatic host": {
+			"https://c1.jdbstatic.com/thumbs/aa/aaaaa1.jpg",
+			"https://c1.jdbstatic.com/thumbs/aa/aaaaa1.jpg",
+		},
+		"empty": {
+			"",
+			"",
+		},
+		"blank": {
+			"   ",
+			"",
+		},
+		"garbage": {
+			"not a url",
+			"not a url",
+		},
+		"unrelated": {
+			"https://example.com/preview.mp4",
+			"https://example.com/preview.mp4",
+		},
+		"lookalike path": {
+			"https://example.com/albums/thumbs/1.jpg",
+			"https://example.com/albums/thumbs/1.jpg",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tt.want, rewriteImageURL(tt.in))
+		})
+	}
+}
+
+func TestFlexNamesPreviewImages(t *testing.T) {
+	var v struct {
+		Images flexNames `json:"preview_images"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"preview_images": [
+			{"thumb_url": "https://cdn.example/thumb.jpg", "large_url": "https://cdn.example/large.jpg"},
+			{"thumb_url": "https://cdn.example/only-thumb.jpg"},
+			{"url": "https://cdn.example/url.jpg"},
+			{"large_url": "  ", "name": "fallback"},
+			{"name": "actor"}
+		]
+	}`), &v))
+	assert.Equal(t, flexNames{
+		"https://cdn.example/large.jpg",
+		"https://cdn.example/only-thumb.jpg",
+		"https://cdn.example/url.jpg",
+		"fallback",
+		"actor",
+	}, v.Images)
+}
+
+// detailFixtureEncrypted is a detail payload whose images are the encrypted
+// app CDN form, including preview_images as objects with large_url.
+const detailFixtureEncrypted = `{
+  "success": 1,
+  "action": null,
+  "message": null,
+  "data": {
+    "movie": {
+      "id": "82BkzE",
+      "number": "FC2-4925979",
+      "title": "サンプル作品タイトル",
+      "thumb_url": "https://tp-iu.cmastd.com/rhe951l4q/small_covers/82/82BkzE.jpg",
+      "cover_url": "https://tp-iu.cmastd.com/rhe951l4q/covers/82/82BkzE.jpg",
+      "duration": 85,
+      "score": 3.63,
+      "release_date": "2026-06-26",
+      "maker_name": "FC2",
+      "preview_images": [{
+        "thumb_url": "https://tp-iu.cmastd.com/rhe951l4q/samples/82/82BkzE_s_0.jpg",
+        "large_url": "https://tp-iu.cmastd.com/rhe951l4q/samples/82/82BkzE_l_0.jpg"
+      }]
+    }
+  }
+}`
+
+func TestGetMovieInfoByID_EncryptedImages(t *testing.T) {
+	isolateWebImagePrefix(t)
+	setWebImagePrefix("https://c0.jdbstatic.com")
+	require.Contains(t, detailFixtureEncrypted, "tp-iu.cmastd.com")
+
+	stub := &apiStub{detail: detailFixtureEncrypted}
+	stub.start(t)
+
+	info, err := New().GetMovieInfoByID("82BkzE")
+	require.NoError(t, err)
+	assert.Equal(t, "https://c0.jdbstatic.com/covers/82/82BkzE.jpg", info.CoverURL)
+	assert.Equal(t, "https://c0.jdbstatic.com/small_covers/82/82BkzE.jpg", info.ThumbURL)
+	assert.Equal(t, []string{"https://c0.jdbstatic.com/samples/82/82BkzE_l_0.jpg"}, []string(info.PreviewImages))
+	assert.NotContains(t, info.CoverURL, "cmastd.com")
+	assert.NotContains(t, info.ThumbURL, "cmastd.com")
+	assert.True(t, info.IsValid())
+	// A warm prefix cache must not spend a startup request.
+	assert.Equal(t, []string{stub.detailPath()}, stub.recordedPaths())
+}
+
+const searchFixtureEncrypted = `{
+  "success": 1,
+  "action": null,
+  "message": null,
+  "data": {
+    "movies": [
+      {"id": "82BkzE", "number": "FC2-4925979", "title": "サンプル作品タイトル",
+       "thumb_url": "https://tp.spfcas.com/rhe951l4q/small_covers/82/82BkzE.jpg",
+       "cover_url": "https://tp.spfcas.com/rhe951l4q/covers/82/82BkzE.jpg",
+       "duration": 85, "score": "3.63", "release_date": "2026-06-26"}
+    ]
+  }
+}`
+
+func TestSearchMovie_EncryptedImages(t *testing.T) {
+	isolateWebImagePrefix(t)
+	setWebImagePrefix("https://c0.jdbstatic.com")
+
+	stub := &apiStub{search: searchFixtureEncrypted}
+	stub.start(t)
+
+	results, err := New().SearchMovie("FC2-4925979")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "https://c0.jdbstatic.com/covers/82/82BkzE.jpg", results[0].CoverURL)
+	assert.Equal(t, "https://c0.jdbstatic.com/small_covers/82/82BkzE.jpg", results[0].ThumbURL)
+	assert.NotContains(t, results[0].CoverURL, "spfcas.com")
+	assert.Equal(t, []string{apiSearchPath}, stub.recordedPaths())
+}
+
+func TestRewriteImageURL_LoadsPrefixFromStartup(t *testing.T) {
+	isolateWebImagePrefix(t)
+	stub := &apiStub{startup: `{
+		"success": 1,
+		"action": null,
+		"message": null,
+		"data": {"web_image_prefix": "https://img.example.test/"}
+	}`}
+	stub.start(t)
+	setWebImagePrefix("")
+	_ = New()
+
+	in := "https://tp-iu.cmastd.com/rhe951l4q/covers/zb/ZbX7.jpg"
+	assert.Equal(t, "https://img.example.test/covers/zb/ZbX7.jpg", rewriteImageURL(in))
+	assert.Equal(t, "https://img.example.test/covers/zb/ZbX7.jpg", rewriteImageURL(in))
+
+	var startups []int
+	for i, p := range stub.recordedPaths() {
+		if p == apiStartupPath {
+			startups = append(startups, i)
+		}
+	}
+	require.Len(t, startups, 1, "startup should be fetched once and cached")
+	assert.Regexp(t, `^[0-9]+\.lpw6vgqzsp\.[0-9a-f]{32}$`,
+		stub.recordedHeaderGet(startups[0], "jdsignature"))
+	assertAppIdentity(t, stub, startups[0])
+}
+
+func TestRewriteImageURL_StartupFailureUsesFallback(t *testing.T) {
+	isolateWebImagePrefix(t)
+	stub := &apiStub{startupStatus: http.StatusBadGateway}
+	stub.start(t)
+	setWebImagePrefix("")
+	_ = New()
+
+	got := rewriteImageURL("https://tp-iu.cmastd.com/rhe951l4q/thumbs/zb/ZbX7.jpg")
+	assert.Equal(t, fallbackWebImagePrefix+"/thumbs/zb/ZbX7.jpg", got)
+	_ = rewriteImageURL("https://tp-iu.cmastd.com/rhe951l4q/covers/zb/ZbX7.jpg")
+
+	var n int
+	for _, p := range stub.recordedPaths() {
+		if p == apiStartupPath {
+			n++
+		}
+	}
+	assert.Equal(t, 1, n, "a failed startup should be cached briefly")
+}
+
+func TestFetcherSendsReferer(t *testing.T) {
+	var referer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		referer = r.Referer()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(srv.Close)
+
+	resp, err := New().Fetch(srv.URL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, "https://javdb.com/", referer)
 }
