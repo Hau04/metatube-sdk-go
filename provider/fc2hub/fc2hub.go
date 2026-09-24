@@ -57,7 +57,7 @@ func (fc2hub *FC2HUB) ParseMovieIDFromURL(rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if ss := regexp.MustCompile(`/video/(\d+)/id(\d+)`).FindStringSubmatch(homepage.Path); len(ss) == 3 {
+	if ss := videoPathPattern.FindStringSubmatch(homepage.Path); len(ss) == 3 {
 		return fmt.Sprintf("%s-%s", ss[1], ss[2]), nil
 	}
 	return "", provider.ErrInvalidURL
@@ -86,7 +86,28 @@ func (fc2hub *FC2HUB) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, e
 
 	// Title
 	c.OnXML(`//*[@id="content"]/div/div[2]/div[1]/div[1]/div[2]/h1`, func(e *colly.XMLElement) {
-		info.Title = strings.TrimSpace(e.Text)
+		if title := cleanTitle(e.Text); title != "" && !isNumberOnly(title) {
+			info.Title = title
+		}
+	})
+
+	// Head metadata, used when the page layout no longer matches the XPaths
+	// above (for example when the product is marked unavailable).
+	var metaTitle, metaImage string
+	c.OnXML(`//meta[@property="og:title" or @name="twitter:title"]`, func(e *colly.XMLElement) {
+		if metaTitle == "" {
+			metaTitle = cleanTitle(e.Attr("content"))
+		}
+	})
+	c.OnXML(`/html/head/title`, func(e *colly.XMLElement) {
+		if metaTitle == "" {
+			metaTitle = cleanTitle(e.Text)
+		}
+	})
+	c.OnXML(`//meta[@property="og:image" or @name="twitter:image"]`, func(e *colly.XMLElement) {
+		if metaImage == "" && strings.TrimSpace(e.Attr("content")) != "" {
+			metaImage = e.Request.AbsoluteURL(strings.TrimSpace(e.Attr("content")))
+		}
 	})
 
 	// Summary
@@ -127,19 +148,19 @@ func (fc2hub *FC2HUB) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, e
 	})
 
 	// Fields
-	c.OnXML(`/html/head/script[@type="application/ld+json"]`, func(e *colly.XMLElement) {
+	c.OnXML(`//script[@type="application/ld+json"]`, func(e *colly.XMLElement) {
 		data := struct {
 			Type string `json:"@type"`
 			// `Movie`
-			Name          string   `json:"name"`
-			Description   string   `json:"description"`
-			Image         string   `json:"image"`
-			Identifier    []string `json:"identifier"`
-			DatePublished string   `json:"datePublished"`
-			Duration      string   `json:"duration"`
-			Actor         []string `json:"actor"`
-			Genre         []string `json:"genre"`
-			Director      string   `json:"director"`
+			Name          string      `json:"name"`
+			Description   string      `json:"description"`
+			Image         flexStrings `json:"image"`
+			Identifier    flexStrings `json:"identifier"`
+			DatePublished string      `json:"datePublished"`
+			Duration      string      `json:"duration"`
+			Actor         flexStrings `json:"actor"`
+			Genre         flexStrings `json:"genre"`
+			Director      flexStrings `json:"director"`
 			// `CreativeWorkSeries`
 			AggregateRating struct {
 				BestRating  float64 `json:"bestRating"`
@@ -150,7 +171,7 @@ func (fc2hub *FC2HUB) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, e
 			// `WebPage`
 			URL string `json:"url"`
 		}{}
-		if json.Unmarshal([]byte(e.Text), &data) == nil {
+		if json.Unmarshal([]byte(strings.TrimSpace(e.Text)), &data) == nil {
 			switch data.Type {
 			case "Movie":
 				if data.Name != "" {
@@ -159,15 +180,15 @@ func (fc2hub *FC2HUB) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, e
 				if info.Summary == "" {
 					info.Summary = data.Description
 				}
-				if data.Director != "" {
+				if len(data.Director) > 0 && data.Director[0] != "" {
 					// Use director as maker.
-					info.Maker = data.Director
+					info.Maker = data.Director[0]
 				}
 				if len(info.Genres) == 0 {
-					info.Genres = removeEmpty(data.Genre)
+					info.Genres = removeEmpty([]string(data.Genre))
 				}
 				if len(data.Actor) > 0 {
-					info.Actors = removeEmpty(data.Actor)
+					info.Actors = removeEmpty([]string(data.Actor))
 				}
 				for _, identifier := range data.Identifier {
 					if num := fc2util.ParseNumber(identifier); num != "" {
@@ -175,7 +196,9 @@ func (fc2hub *FC2HUB) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, e
 						break
 					}
 				}
-				info.CoverURL = data.Image
+				if len(data.Image) > 0 && data.Image[0] != "" {
+					info.CoverURL = e.Request.AbsoluteURL(data.Image[0])
+				}
 				info.ReleaseDate = parser.ParseDate(data.DatePublished)
 				info.Runtime = parser.ParseRuntime(data.Duration)
 			case "CreativeWorkSeries":
@@ -192,6 +215,22 @@ func (fc2hub *FC2HUB) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, e
 
 	// Cover (fallback)
 	c.OnScraped(func(_ *colly.Response) {
+		if info.Title == "" || isNumberOnly(info.Title) {
+			if metaTitle != "" && !isNumberOnly(metaTitle) {
+				info.Title = metaTitle
+			}
+		}
+		if info.Number == "" {
+			// The URL always carries the FC2 id: /video/{vid}/id{number}.
+			if ss := strings.SplitN(id, "-", 2); len(ss) == 2 {
+				if num := fc2util.ParseNumber(ss[1]); num != "" {
+					info.Number = fmt.Sprintf("FC2-%s", num)
+				}
+			}
+		}
+		if info.CoverURL == "" {
+			info.CoverURL = metaImage
+		}
 		if info.CoverURL == "" && len(info.PreviewImages) > 0 {
 			info.CoverURL = info.PreviewImages[0]
 		}
@@ -201,11 +240,10 @@ func (fc2hub *FC2HUB) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, e
 
 	// Homepage (update)
 	c.OnScraped(func(_ *colly.Response) {
-		if info.ID != "" && len(info.Number) > 4 && info.Title != "" {
-			info.Homepage = fmt.Sprintf(movieURL,
-				strings.SplitN(info.ID, "-", 2)[0],
-				info.Number[4:],
-				url.PathEscape(info.Title))
+		ss := strings.SplitN(info.ID, "-", 2)
+		num := fc2util.ParseNumber(info.Number)
+		if len(ss) == 2 && ss[0] != "" && num != "" && info.Title != "" {
+			info.Homepage = fmt.Sprintf(movieURL, ss[0], num, url.PathEscape(info.Title))
 		}
 	})
 
@@ -218,28 +256,129 @@ func (fc2hub *FC2HUB) NormalizeMovieKeyword(keyword string) string {
 }
 
 func (fc2hub *FC2HUB) SearchMovie(keyword string) (results []*model.MovieSearchResult, err error) {
+	number := fc2util.ParseNumber(keyword)
+	if number == "" {
+		return nil, provider.ErrInvalidKeyword
+	}
+
+	var videoURL string
 	c := fc2hub.ClonedCollector()
 	c.ParseHTTPErrorResponse = true
 	c.SetRedirectHandler(func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
+		// Record a redirect straight to the video page, but keep following
+		// so a 200 search page (or a /en/ hop) is still handled below.
+		if videoURL == "" && matchVideoPath(req.URL.Path, number) {
+			videoURL = req.URL.String()
+		}
+		if len(via) >= 10 {
+			return http.ErrUseLastResponse
+		}
+		return nil
 	})
 
 	c.OnResponse(func(r *colly.Response) {
-		var loc *url.URL
-		if loc, err = url.Parse(r.Request.AbsoluteURL(r.Headers.Get("Location"))); err != nil {
+		if videoURL != "" {
 			return
 		}
-		if regexp.MustCompile(`/video/\d+/id\d+`).MatchString(loc.Path) {
-			var info *model.MovieInfo
-			if info, err = fc2hub.GetMovieInfoByURL(loc.String()); err != nil {
+		if loc := r.Headers.Get("Location"); loc != "" {
+			if u, e := url.Parse(r.Request.AbsoluteURL(loc)); e == nil && matchVideoPath(u.Path, number) {
+				videoURL = u.String()
 				return
 			}
-			results = append(results, info.ToSearchResult())
+		}
+		if matchVideoPath(r.Request.URL.Path, number) {
+			videoURL = r.Request.URL.String()
+			return
+		}
+		// Search results page, meta refresh or script redirect: take the
+		// first link to /video/{vid}/id{number}.
+		if m := videoLinkPattern.FindAllSubmatch(r.Body, -1); m != nil {
+			for _, sm := range m {
+				if string(sm[2]) == number {
+					videoURL = r.Request.AbsoluteURL(string(sm[0]))
+					return
+				}
+			}
 		}
 	})
 
-	err = c.Visit(fmt.Sprintf(searchURL, url.QueryEscape(keyword)))
-	return
+	if e := c.Visit(fmt.Sprintf(searchURL, url.QueryEscape(number))); e != nil && videoURL == "" {
+		return nil, e
+	}
+	if videoURL == "" {
+		return nil, provider.ErrInfoNotFound
+	}
+	info, err := fc2hub.GetMovieInfoByURL(videoURL)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsValid() {
+		return nil, provider.ErrIncompleteMetadata
+	}
+	return []*model.MovieSearchResult{info.ToSearchResult()}, nil
+}
+
+var (
+	videoPathPattern = regexp.MustCompile(`/video/(\d+)/id(\d+)`)
+	videoLinkPattern = regexp.MustCompile(`(?:https?://[^"'\s<>]+)?(?:/[a-z]{2})?/video/(\d+)/id(\d+)/?`)
+	titleNumberHead  = regexp.MustCompile(`(?i)^\s*[\[【(]?\s*FC2[-_\s]*(?:PPV[-_\s]*)?\d+\s*[\]】)]?\s*`)
+	titleSiteTail    = regexp.MustCompile(`(?i)\s*[-|｜]\s*(?:JAVten(?:\.com)?|FC2HUB(?:\.com)?)\s*$`)
+)
+
+func matchVideoPath(p, number string) bool {
+	m := videoPathPattern.FindStringSubmatch(p)
+	return m != nil && (number == "" || m[2] == number)
+}
+
+// cleanTitle strips the "[FC2-PPV-123]" prefix and the site suffix that the
+// page <title> and og:title carry.
+func cleanTitle(s string) string {
+	s = strings.TrimSpace(s)
+	s = titleSiteTail.ReplaceAllString(s, "")
+	if t := strings.TrimSpace(titleNumberHead.ReplaceAllString(s, "")); t != "" {
+		s = t
+	}
+	return strings.TrimSpace(s)
+}
+
+func isNumberOnly(s string) bool {
+	return titleNumberHead.ReplaceAllString(strings.TrimSpace(s), "") == ""
+}
+
+// flexStrings accepts a JSON string, an array of strings, or objects with a
+// name/url field (as schema.org allows for actor, genre and image).
+type flexStrings []string
+
+func (f *flexStrings) UnmarshalJSON(b []byte) error {
+	var one any
+	if err := json.Unmarshal(b, &one); err != nil {
+		return err
+	}
+	*f = nil
+	var walk func(v any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case string:
+			if t = strings.TrimSpace(t); t != "" {
+				*f = append(*f, t)
+			}
+		case []any:
+			for _, x := range t {
+				walk(x)
+			}
+		case map[string]any:
+			for _, k := range []string{"name", "url", "contentUrl", "value"} {
+				if s, ok := t[k].(string); ok && strings.TrimSpace(s) != "" {
+					*f = append(*f, strings.TrimSpace(s))
+					return
+				}
+			}
+		case float64:
+			*f = append(*f, fmt.Sprintf("%.0f", t))
+		}
+	}
+	walk(one)
+	return nil
 }
 
 func removeEmpty(in []string) (out []string) {

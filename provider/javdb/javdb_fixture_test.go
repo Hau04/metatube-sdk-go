@@ -669,7 +669,7 @@ func TestRewriteImageURL(t *testing.T) {
 		},
 		"encrypted small cover": {
 			"https://tp-iu.cmastd.com/rhe951l4q/small_covers/5e/5EpYBB.jpg",
-			"https://c0.jdbstatic.com/small_covers/5e/5EpYBB.jpg",
+			"https://c0.jdbstatic.com/thumbs/5e/5EpYBB.jpg",
 		},
 		"cmastd host without token": {
 			"https://cmastd.com/covers/zb/ZbX7.jpg",
@@ -784,7 +784,7 @@ func TestGetMovieInfoByID_EncryptedImages(t *testing.T) {
 	info, err := New().GetMovieInfoByID("82BkzE")
 	require.NoError(t, err)
 	assert.Equal(t, "https://c0.jdbstatic.com/covers/82/82BkzE.jpg", info.CoverURL)
-	assert.Equal(t, "https://c0.jdbstatic.com/small_covers/82/82BkzE.jpg", info.ThumbURL)
+	assert.Equal(t, "https://c0.jdbstatic.com/thumbs/82/82BkzE.jpg", info.ThumbURL)
 	assert.Equal(t, []string{"https://c0.jdbstatic.com/samples/82/82BkzE_l_0.jpg"}, []string(info.PreviewImages))
 	assert.NotContains(t, info.CoverURL, "cmastd.com")
 	assert.NotContains(t, info.ThumbURL, "cmastd.com")
@@ -818,7 +818,7 @@ func TestSearchMovie_EncryptedImages(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "https://c0.jdbstatic.com/covers/82/82BkzE.jpg", results[0].CoverURL)
-	assert.Equal(t, "https://c0.jdbstatic.com/small_covers/82/82BkzE.jpg", results[0].ThumbURL)
+	assert.Equal(t, "https://c0.jdbstatic.com/thumbs/82/82BkzE.jpg", results[0].ThumbURL)
 	assert.NotContains(t, results[0].CoverURL, "spfcas.com")
 	assert.Equal(t, []string{apiSearchPath}, stub.recordedPaths())
 }
