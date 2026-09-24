@@ -152,8 +152,8 @@ func (fc2hub *FC2HUB) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, e
 		data := struct {
 			Type string `json:"@type"`
 			// `Movie`
-			Name          string   `json:"name"`
-			Description   string   `json:"description"`
+			Name          string      `json:"name"`
+			Description   string      `json:"description"`
 			Image         flexStrings `json:"image"`
 			Identifier    flexStrings `json:"identifier"`
 			DatePublished string      `json:"datePublished"`
