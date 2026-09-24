@@ -453,6 +453,12 @@ func TestGetMovieInfoByID_InternalID(t *testing.T) {
 	assert.True(t, info.IsValid())
 
 	assert.Equal(t, []string{stub.detailPath()}, stub.recordedPaths())
+	require.Equal(t, 1, stub.recordedCount())
+	assertAppIdentity(t, stub, 0)
+	assert.Equal(t, appUserAgent, stub.recordedHeaderGet(0, "User-Agent"))
+	assert.Equal(t, appAcceptLanguage, stub.recordedHeaderGet(0, "Accept-Language"))
+	assert.Regexp(t, `^[0-9]+\.lpw6vgqzsp\.[0-9a-f]{32}$`,
+		stub.recordedHeaderGet(0, "jdsignature"))
 }
 
 // TestGetMovieInfoByID_PrintedNumber checks the two-step path: a printed
@@ -471,13 +477,35 @@ func TestGetMovieInfoByID_PrintedNumber(t *testing.T) {
 	assert.Equal(t, "FC2-4925979", stub.recordedQueryGet(0, "q"))
 	assert.Equal(t, "1", stub.recordedQueryGet(0, "page"))
 
-	// Every request must carry a signed header and ask for JSON.
+	// Every request must carry a signed header, ask for JSON, look like the
+	// official Android app, and advertise the Flutter/Dart UA the app sends.
 	require.Equal(t, 2, stub.recordedCount())
 	for i := 0; i < 2; i++ {
 		assert.Regexp(t, `^[0-9]+\.lpw6vgqzsp\.[0-9a-f]{32}$`,
 			stub.recordedHeaderGet(i, "jdsignature"), "request %d is unsigned", i)
 		assert.Equal(t, "application/json", stub.recordedHeaderGet(i, "accept"))
+		assert.Equal(t, appUserAgent, stub.recordedHeaderGet(i, "User-Agent"),
+			"request %d missing app user-agent", i)
+		assert.Equal(t, appAcceptLanguage, stub.recordedHeaderGet(i, "Accept-Language"),
+			"request %d missing accept-language", i)
+		assertAppIdentity(t, stub, i)
 	}
+}
+
+// assertAppIdentity checks that request i carried the official Android app's
+// identification query parameters, including a stable per-process device_uuid.
+func assertAppIdentity(t *testing.T, stub *apiStub, i int) {
+	t.Helper()
+	assert.Equal(t, appChannel, stub.recordedQueryGet(i, "app_channel"))
+	assert.Equal(t, appVersion, stub.recordedQueryGet(i, "app_version"))
+	assert.Equal(t, appVersionNumber, stub.recordedQueryGet(i, "app_version_number"))
+	assert.Equal(t, appPlatform, stub.recordedQueryGet(i, "platform"))
+	assert.Equal(t, appSystemVersion, stub.recordedQueryGet(i, "system_version"))
+	assert.Equal(t, appDeviceModel, stub.recordedQueryGet(i, "device_model"))
+	assert.Equal(t, appDeviceName, stub.recordedQueryGet(i, "device_name"))
+	assert.Equal(t, deviceUUID, stub.recordedQueryGet(i, "device_uuid"))
+	assert.Regexp(t, `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+		stub.recordedQueryGet(i, "device_uuid"))
 }
 
 // TestGetMovieInfoByID_BareDigits covers an FC2 number typed without its
