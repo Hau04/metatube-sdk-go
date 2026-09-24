@@ -17,6 +17,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/gocolly/colly/v2 v2.3.0
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/schema v1.4.1
 	github.com/grafov/m3u8 v0.12.1
 	github.com/hashicorp/go-cleanhttp v0.5.2
@@ -78,7 +79,6 @@ require (
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/gotestyourself/gotestyourself v2.2.0+incompatible // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

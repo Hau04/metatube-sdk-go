@@ -377,18 +377,28 @@ func buildMovieInfo(m *apiMovie) (*model.MovieInfo, error) {
 
 // do performs a signed GET request against the JavDB app API.
 //
-// The signature is the only credential the API needs, and it is derived from
-// the current time, so no account or cookie is involved.
+// Every request carries the official Android app's identification (channel,
+// version, platform, device) as query parameters, plus the time-based
+// jdsignature header and the Flutter/Dart User-Agent the app itself sends.
+// No account or cookie is involved: the signature is the only credential,
+// and it is derived from the current time.
 func (javdb *JavDB) do(c *colly.Collector, endpoint string, params url.Values) error {
-	requestURL := apiHost + endpoint
-	if len(params) > 0 {
-		requestURL += "?" + params.Encode()
+	q := appIdentity()
+	for key, values := range params {
+		for _, value := range values {
+			q.Add(key, value)
+		}
 	}
+	requestURL := apiHost + endpoint + "?" + q.Encode()
+
 	headers := http.Header{}
 	headers.Set("jdsignature", jdSignature(time.Now().Unix()))
 	headers.Set("accept", "application/json")
-	// The header map replaces the collector's, so User-Agent is deliberately
-	// left out: colly then fills in the collector's own (randomised) agent.
+	headers.Set("accept-language", appAcceptLanguage)
+	// The header map replaces the collector's, so the Flutter/Dart UA must
+	// be set explicitly; otherwise colly would fill in a randomised browser
+	// agent that the API has never been shown to accept.
+	headers.Set("user-agent", appUserAgent)
 	return c.Request(http.MethodGet, requestURL, nil, nil, headers)
 }
 

@@ -5,8 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // JavDB publishes a JSON API for its mobile app which, unlike the website, is
@@ -30,6 +33,30 @@ const (
 // signing, envelope handling and mapping - without touching the network.
 var apiHost = "https://jdforrepam.com"
 
+// Official Android app identification attached to every request. The app
+// advertises these as query parameters alongside the signed jdsignature
+// header; sending only the signature (and a randomised scraper UA) has never
+// been shown to be accepted by the API. Values match a recent official
+// Android build (1.9.28 / build 10928) running on a Pixel 6.
+const (
+	appChannel       = "official"
+	appVersion       = "1.9.28"
+	appVersionNumber = "10928"
+	appPlatform      = "android"
+	appSystemVersion = "13"
+	appDeviceModel   = "Pixel 6"
+	appDeviceName    = "Pixel"
+	// appUserAgent is the Flutter/Dart HTTP client UA the official app sends.
+	appUserAgent = "Dart/3.4 (dart:io)"
+	// appAcceptLanguage is the locale the Japanese-language app requests.
+	appAcceptLanguage = "ja"
+)
+
+// deviceUUID is a random v4 UUID minted once per process so successive
+// requests look like they come from the same installed app. It is not a
+// secret and is not persisted across restarts.
+var deviceUUID = uuid.NewString()
+
 // The jdsignature header is "{timestamp}.{tag}.{md5(timestamp + key)}". The key
 // and tag are fixed key material belonging to the official Android app; only
 // the timestamp changes per request. The algorithm is:
@@ -42,6 +69,22 @@ const (
 	// jdSignatureTag is the middle segment of the header value.
 	jdSignatureTag = "lpw6vgqzsp"
 )
+
+// appIdentity returns the query parameters the official Android app attaches
+// to every request. Callers must merge these onto any endpoint-specific
+// parameters before the request is issued.
+func appIdentity() url.Values {
+	v := url.Values{}
+	v.Set("app_channel", appChannel)
+	v.Set("app_version", appVersion)
+	v.Set("app_version_number", appVersionNumber)
+	v.Set("platform", appPlatform)
+	v.Set("system_version", appSystemVersion)
+	v.Set("device_model", appDeviceModel)
+	v.Set("device_name", appDeviceName)
+	v.Set("device_uuid", deviceUUID)
+	return v
+}
 
 // jdSignature returns the value of the jdsignature header for a unix second.
 //
