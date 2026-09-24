@@ -1,10 +1,11 @@
 package fc2ppvdb
 
-// NOTE: temporary diagnostic test, enabled only in GitHub Actions. It
-// verifies the provider against the live site from a CI runner and logs the
-// raw Inertia page state so the anonymous data contract (image_url,
-// actresses, video_id type, ...) can be inspected in the CI logs. This file
-// is meant to be removed after the verification is done.
+// Opt-in live diagnostic test. It is NOT part of the regular test suite:
+// it only runs when FC2PPVDB_PROBE=1 is set, so CI and normal local runs
+// stay hermetic. Use it to inspect the live anonymous data contract of
+// fc2cmadb.com (raw Inertia page state + provider result):
+//
+//	FC2PPVDB_PROBE=1 go test ./provider/fc2ppvdb/ -run TestFC2PPVDB_LiveProbe -v
 
 import (
 	"encoding/json"
@@ -20,8 +21,8 @@ import (
 )
 
 func TestFC2PPVDB_LiveProbe(t *testing.T) {
-	if os.Getenv("GITHUB_ACTIONS") != "true" {
-		t.Skip("live probe runs only in GitHub Actions")
+	if os.Getenv("FC2PPVDB_PROBE") != "1" {
+		t.Skip("set FC2PPVDB_PROBE=1 to run the live probe")
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -63,7 +64,7 @@ func TestFC2PPVDB_LiveProbe(t *testing.T) {
 	t.Logf("article prop: %s", string(raw.Props.Article))
 	t.Logf("actresses prop: %s", string(raw.Props.Actresses))
 
-	// Exercise the actual provider code path.
+	// Exercise the actual provider code path (colly + parsing).
 	info, err := New().GetMovieInfoByID("4925979")
 	if err != nil {
 		t.Fatalf("provider failed: %v", err)
