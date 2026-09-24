@@ -32,6 +32,12 @@ const (
 	movieURL = "https://fc2cmadb.com/articles/%s"
 )
 
+// defaultCoverURL is the placeholder the site serves for videos without a
+// custom cover. MetaTube treats a movie as invalid without a cover
+// (model.MovieInfo.IsValid requires a non-empty CoverURL), so the placeholder
+// is reported instead of leaving the field empty.
+const defaultCoverURL = baseURL + "storage/images/article/no-image.jpg"
+
 // The database was rebranded from fc2ppvdb.com to fc2cmadb.com in 2026
 // (see metatube-community/metatube-sdk-go#363). Movie homepages cached by
 // older versions of this provider may still point at the legacy domain.
@@ -149,26 +155,40 @@ func (fc2ppvdb *FC2PPVDB) GetMovieInfoByURL(rawURL string) (info *model.MovieInf
 	return parsedInfo, nil
 }
 
-// extractDataPage returns the JSON string stored in the "data-page" HTML
+// extractDataPage returns the JSON document stored in the "data-page" HTML
 // attribute of the Inertia app root element.
+//
+// A page can carry more than one element with a data-page attribute: the
+// production layout also sets <body data-page="articles.show">, whose value is
+// the Laravel route name rather than JSON. Matching the first element in
+// document order therefore yields "articles.show", which json.Unmarshal
+// rejects with "invalid character 'a' looking for beginning of value". The
+// Inertia page state always lives on the #app root element, so that element is
+// preferred, and any data-page value that is not a JSON object is skipped.
 func extractDataPage(body []byte) (string, error) {
 	node, err := htmlquery.Parse(bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("fc2ppvdb: failed to parse HTML: %w", err)
 	}
-	e, err := htmlquery.Query(node, "//*[@data-page]")
+	// Preferred: the Inertia app root element.
+	if e, err := htmlquery.Query(node, "//*[@id='app'][@data-page]"); err == nil && e != nil {
+		if val := strings.TrimSpace(htmlquery.SelectAttr(e, "data-page")); strings.HasPrefix(val, "{") {
+			return val, nil
+		}
+	}
+	// Fallback: any element whose data-page value is a JSON object, in case
+	// the app root is renamed but the page state is still embedded.
+	nodes, err := htmlquery.QueryAll(node, "//*[@data-page]")
 	if err != nil {
 		return "", fmt.Errorf("fc2ppvdb: invalid XPath expression: %w", err)
 	}
-	if e == nil {
-		return "", fmt.Errorf("fc2ppvdb: data-page attribute not found (site layout changed or bot challenge page)")
-	}
-	for _, a := range e.Attr {
-		if a.Key == "data-page" && a.Val != "" {
-			return a.Val, nil
+	for _, n := range nodes {
+		val := strings.TrimSpace(htmlquery.SelectAttr(n, "data-page"))
+		if strings.HasPrefix(val, "{") {
+			return val, nil
 		}
 	}
-	return "", fmt.Errorf("fc2ppvdb: empty data-page attribute")
+	return "", fmt.Errorf("fc2ppvdb: data-page JSON attribute not found (site layout changed or bot challenge page)")
 }
 
 // buildMovieInfo maps the Inertia page state to a *model.MovieInfo.
@@ -199,8 +219,10 @@ func buildMovieInfo(page *inertiaPage, homepage string) (info *model.MovieInfo, 
 		Title:         strings.TrimSpace(a.Title),
 	}
 
-	// Cover image (skip the "no image" placeholder).
-	if u := strings.TrimSpace(string(a.ImageURL)); u != "" && !strings.Contains(u, "no-image") {
+	// Cover image. Videos without a custom cover are served the site's
+	// "no image" placeholder; it is kept rather than discarded because
+	// MetaTube rejects metadata with an empty CoverURL.
+	if u := strings.TrimSpace(string(a.ImageURL)); u != "" {
 		if abs, e := url.Parse(u); e == nil {
 			if !abs.IsAbs() {
 				if abs, e = url.Parse(baseURL + strings.TrimLeft(u, "/")); e == nil {
@@ -210,6 +232,9 @@ func buildMovieInfo(page *inertiaPage, homepage string) (info *model.MovieInfo, 
 				info.CoverURL = abs.String()
 			}
 		}
+	}
+	if info.CoverURL == "" {
+		info.CoverURL = defaultCoverURL
 	}
 
 	// Maker (writer).
