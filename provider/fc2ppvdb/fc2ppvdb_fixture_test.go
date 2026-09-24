@@ -145,7 +145,10 @@ func TestExtractDataPage_InertiaV1(t *testing.T) {
 
 	dataPage, err := extractDataPage(body)
 	require.NoError(t, err)
-	assert.Contains(t, dataPage, `"component":"Articles/Show"`)
+	// The state sits in an attribute here, so it arrives HTML-escaped: entity
+	// decoding is what turns it into a JSON document, and nothing may be left
+	// escaped once it has been extracted.
+	assert.NotContains(t, dataPage, "&quot;")
 	var v map[string]any
 	require.NoError(t, json.Unmarshal([]byte(dataPage), &v))
 	assert.Equal(t, "Articles/Show", v["component"])

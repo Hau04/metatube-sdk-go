@@ -93,21 +93,12 @@ func (fc2ppvdb *FC2PPVDB) GetMovieInfoByURL(rawURL string) (info *model.MovieInf
 		return
 	}
 
-	// Initial info, may be overwritten below.
-	info = &model.MovieInfo{
-		ID:            id,
-		Number:        fmt.Sprintf("FC2-%s", id),
-		Provider:      fc2ppvdb.Name(),
-		Homepage:      homepageStr,
-		Actors:        []string{},
-		PreviewImages: []string{},
-		Genres:        []string{},
-	}
-
+	// info is filled in by the response callback below. Leaving it nil is what
+	// turns a page that carries no movie data into an error rather than an
+	// empty result.
 	c := fc2ppvdb.ClonedCollector()
 
 	var (
-		parsedInfo *model.MovieInfo
 		parseErr   error
 		statusCode int
 	)
@@ -122,11 +113,7 @@ func (fc2ppvdb *FC2PPVDB) GetMovieInfoByURL(rawURL string) (info *model.MovieInf
 			parseErr = fmt.Errorf("fc2ppvdb: failed to parse data-page JSON: %w", e)
 			return
 		}
-		parsedInfo, e = buildMovieInfo(&page, homepageStr)
-		if e != nil {
-			parseErr = e
-			return
-		}
+		info, parseErr = buildMovieInfo(&page, homepageStr)
 	})
 
 	c.OnError(func(r *colly.Response, _ error) {
@@ -149,10 +136,10 @@ func (fc2ppvdb *FC2PPVDB) GetMovieInfoByURL(rawURL string) (info *model.MovieInf
 	if parseErr != nil {
 		return nil, parseErr
 	}
-	if parsedInfo == nil {
+	if info == nil {
 		return nil, fmt.Errorf("fc2ppvdb: no movie data found in page %s", homepageStr)
 	}
-	return parsedInfo, nil
+	return info, nil
 }
 
 // jsonObject returns s without surrounding whitespace when it is a valid JSON
