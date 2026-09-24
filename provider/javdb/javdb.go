@@ -13,6 +13,7 @@ import (
 	"github.com/gocolly/colly/v2"
 	"golang.org/x/text/language"
 
+	"github.com/metatube-community/metatube-sdk-go/common/fetch"
 	"github.com/metatube-community/metatube-sdk-go/common/parser"
 	"github.com/metatube-community/metatube-sdk-go/model"
 	"github.com/metatube-community/metatube-sdk-go/provider"
@@ -22,6 +23,7 @@ import (
 var (
 	_ provider.MovieProvider = (*JavDB)(nil)
 	_ provider.MovieSearcher = (*JavDB)(nil)
+	_ provider.Fetcher       = (*JavDB)(nil)
 )
 
 const (
@@ -51,13 +53,25 @@ var (
 )
 
 // JavDB reads the public JSON API that the JavDB mobile app talks to.
+//
+// Fetcher is embedded so the MetaTube image proxy downloads covers with a
+// javdb.com Referer. The plain image CDN rejects some of those requests
+// (small covers in particular) when the Referer is missing.
 type JavDB struct {
+	*fetch.Fetcher
 	*scraper.Scraper
 }
 
 // New returns a new JavDB provider.
 func New() *JavDB {
-	return &JavDB{scraper.NewDefaultScraper(Name, baseURL, Priority, language.Japanese)}
+	javdb := &JavDB{
+		Fetcher: fetch.Default(&fetch.Config{Referer: baseURL}),
+		Scraper: scraper.NewDefaultScraper(Name, baseURL, Priority, language.Japanese),
+	}
+	// The prefix loader is process-wide: the first provider created serves
+	// every later rewrite. Signing does not depend on per-instance state.
+	ensureWebImageLoader(javdb.fetchWebImagePrefix)
+	return javdb
 }
 
 // looksLikeMovieID reports whether id addresses a movie directly, as opposed
@@ -142,6 +156,9 @@ func (javdb *JavDB) getMovieInfoByMovieID(movieID string) (info *model.MovieInfo
 			err = provider.ErrInfoNotFound
 			return
 		}
+		// App CDN URLs are encrypted; rewrite them before mapping so Emby
+		// receives a plain JPEG address.
+		rewriteMovieImages(resp.Data.Movie)
 		info, err = buildMovieInfo(resp.Data.Movie)
 	})
 
@@ -197,6 +214,7 @@ func (javdb *JavDB) SearchMovie(keyword string) (results []*model.MovieSearchRes
 			if m == nil || strings.TrimSpace(m.ID) == "" {
 				continue
 			}
+			rewriteMovieImages(m)
 			results = append(results, &model.MovieSearchResult{
 				ID:          strings.TrimSpace(m.ID),
 				Number:      strings.TrimSpace(m.Number),
@@ -373,6 +391,49 @@ func buildMovieInfo(m *apiMovie) (*model.MovieInfo, error) {
 	}
 
 	return info, nil
+}
+
+// fetchWebImagePrefix reads data.web_image_prefix from GET /api/v1/startup.
+//
+// The request is signed the same way as search and detail. This must not call
+// rewriteImageURL or setWebImagePrefix: currentWebImagePrefix holds
+// webImageMu across the call.
+func (javdb *JavDB) fetchWebImagePrefix() (prefix string, err error) {
+	c := javdb.ClonedCollector()
+
+	c.OnResponse(func(r *colly.Response) {
+		var resp startupResponse
+		if e := json.Unmarshal(r.Body, &resp); e != nil {
+			err = fmt.Errorf("javdb: failed to parse the startup response: %w", e)
+			return
+		}
+		if !bool(resp.Success) && resp.Action != "" {
+			err = resp.apiError()
+			return
+		}
+		prefix = strings.TrimSpace(resp.Data.WebImagePrefix)
+		if prefix == "" {
+			err = fmt.Errorf("javdb: startup response missing web_image_prefix")
+		}
+	})
+
+	c.OnError(func(r *colly.Response, e error) {
+		if r == nil || r.StatusCode == 0 {
+			if e != nil {
+				err = fmt.Errorf("javdb: startup request failed: %w", e)
+			}
+			return
+		}
+		err = fmt.Errorf("javdb: startup request failed (HTTP %d)", r.StatusCode)
+	})
+
+	if e := javdb.do(c, apiStartupPath, nil); e != nil {
+		if err != nil {
+			return "", err
+		}
+		return "", e
+	}
+	return prefix, err
 }
 
 // do performs a signed GET request against the JavDB app API.
