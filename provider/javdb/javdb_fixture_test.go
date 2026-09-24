@@ -158,6 +158,16 @@ func (s *apiStub) start(t *testing.T) {
 		switch r.URL.Path {
 		case apiSearchPath:
 			_, _ = io.WriteString(w, s.search)
+		case apiStartupPath:
+			if s.startupStatus != 0 {
+				w.WriteHeader(s.startupStatus)
+				return
+			}
+			if s.startup == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_, _ = io.WriteString(w, s.startup)
 		case fmt.Sprintf(apiMoviePath, "82BkzE"):
 			if s.detailStatus != 0 {
 				w.WriteHeader(s.detailStatus)

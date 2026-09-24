@@ -14,9 +14,6 @@ jobs:
   go-test:
     name: Go Test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
     services:
       dind:
         image: docker:dind-rootless
@@ -36,26 +33,4 @@ jobs:
       - name: Run test
         run: |
           go version
-          set +e
-          go test $(go list ./... | grep -Ev "github.com/metatube-community/metatube-sdk-go/translate") > test-out.txt 2>&1
-          code=$?
-          set -e
-          cat test-out.txt
-          tail -c 50000 test-out.txt > test-tail.txt
-          exit $code
-
-      - name: Comment test failure
-        if: failure() && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let log = '';
-            try { log = fs.readFileSync('test-tail.txt', 'utf8'); } catch (e) { log = String(e); }
-            if (log.length > 60000) log = log.slice(-60000);
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: 'Test failure tail:\n\n```\n' + log.replace(/```/g, "'''") + '\n```'
-            });
+          go test $(go list ./... | grep -Ev "github.com/metatube-community/metatube-sdk-go/translate")
