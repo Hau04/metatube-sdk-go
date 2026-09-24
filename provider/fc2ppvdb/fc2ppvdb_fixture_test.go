@@ -15,13 +15,15 @@ import (
 )
 
 // makePageHTML wraps an Inertia page JSON document in a minimal HTML document
-// that mimics the production page layout (the JSON is stored, HTML-escaped,
-// in the data-page attribute of the #app element).
+// that mimics the production page layout: the JSON is stored, HTML-escaped, in
+// the data-page attribute of the #app element, and <body> carries its own
+// non-JSON data-page attribute holding the Laravel route name.
 func makePageHTML(t *testing.T, pageJSON string) []byte {
 	t.Helper()
 	return []byte(fmt.Sprintf(
 		`<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">`+
-			`<title>4925979 Sample - FC2CMADB</title></head><body>`+
+			`<title>4925979 Sample - FC2CMADB</title></head>`+
+			`<body data-page="articles.show">`+
 			`<div id="app" data-page="%s"></div>`+
 			`<script type="module" src="/build/assets/app-BkK2ozc3.js"></script>`+
 			`</body></html>`,
@@ -73,6 +75,9 @@ func TestExtractDataPage(t *testing.T) {
 
 	dataPage, err := extractDataPage(body)
 	require.NoError(t, err)
+	// Regression: the <body data-page="articles.show"> route name must never
+	// be returned; the value must always be the JSON page state.
+	assert.NotEqual(t, "articles.show", dataPage)
 	var v map[string]any
 	require.NoError(t, json.Unmarshal([]byte(dataPage), &v))
 	assert.Equal(t, "Articles/Show", v["component"])
@@ -84,6 +89,51 @@ func TestExtractDataPage(t *testing.T) {
 	// Invalid HTML.
 	_, err = extractDataPage([]byte{0xff, 0xfe, 0xfd})
 	assert.Error(t, err)
+}
+
+func TestExtractDataPage_SkipsNonJSONDataPage(t *testing.T) {
+	const escaped = `{&quot;component&quot;:&quot;Articles/Show&quot;,&quot;props&quot;:{},&quot;url&quot;:&quot;/articles/4925979&quot;}`
+
+	for name, tt := range map[string]struct {
+		html string
+		want string // expected JSON, empty means "expect an error"
+	}{
+		// Production layout: <body> comes first in document order.
+		"body route name first": {
+			html: `<html><body data-page="articles.show"><div id="app" data-page="` + escaped + `"></div></body></html>`,
+			want: `{"component":"Articles/Show","props":{},"url":"/articles/4925979"}`,
+		},
+		// Only the route name is present (e.g. an error/bot page).
+		"only route name": {
+			html: `<html><body data-page="articles.show"><div id="app"></div></body></html>`,
+		},
+		// The app root has no data-page; fall back to another element.
+		"json on non-app element": {
+			html: `<html><body data-page="articles.show"><div id="app"></div>` +
+				`<div id="inertia-root" data-page="` + escaped + `"></div></body></html>`,
+			want: `{"component":"Articles/Show","props":{},"url":"/articles/4925979"}`,
+		},
+		// The app root carries the route name instead; fall back to the JSON.
+		"app root holds route name": {
+			html: `<html><body><div id="app" data-page="articles.show"></div>` +
+				`<div id="inertia-root" data-page="` + escaped + `"></div></body></html>`,
+			want: `{"component":"Articles/Show","props":{},"url":"/articles/4925979"}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := extractDataPage([]byte(tt.html))
+			if tt.want == "" {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			// The returned value must be usable as JSON.
+			var v map[string]any
+			require.NoError(t, json.Unmarshal([]byte(got), &v))
+			assert.Equal(t, "Articles/Show", v["component"])
+		})
+	}
 }
 
 func TestBuildMovieInfo(t *testing.T) {
@@ -120,7 +170,9 @@ func TestBuildMovieInfo_NumberVideoID(t *testing.T) {
 }
 
 func TestBuildMovieInfo_PlaceholderImage(t *testing.T) {
-	// The "no image" placeholder must not be used as a cover.
+	// Videos without a custom cover use the site's "no image" placeholder.
+	// It is reported as the cover because MetaTube discards metadata whose
+	// CoverURL is empty (model.MovieInfo.IsValid).
 	pageJSON := strings.Replace(baseArticleJSON,
 		`"image_url": "/storage/images/article/4925979.jpg"`,
 		`"image_url": "/storage/images/article/no-image.jpg"`, 1)
@@ -128,8 +180,22 @@ func TestBuildMovieInfo_PlaceholderImage(t *testing.T) {
 
 	info, err := buildMovieInfo(page, "https://fc2cmadb.com/articles/4925979")
 	require.NoError(t, err)
-	assert.Empty(t, info.CoverURL)
-	assert.False(t, info.IsValid())
+	assert.Equal(t, "https://fc2cmadb.com/storage/images/article/no-image.jpg", info.CoverURL)
+	assert.True(t, info.IsValid())
+}
+
+func TestBuildMovieInfo_MissingImage(t *testing.T) {
+	// No image_url at all: fall back to the placeholder so the metadata is
+	// still considered valid.
+	pageJSON := strings.Replace(baseArticleJSON,
+		`"image_url": "/storage/images/article/4925979.jpg"`,
+		`"image_url": null`, 1)
+	page := parsePage(t, makePageHTML(t, pageJSON))
+
+	info, err := buildMovieInfo(page, "https://fc2cmadb.com/articles/4925979")
+	require.NoError(t, err)
+	assert.Equal(t, defaultCoverURL, info.CoverURL)
+	assert.True(t, info.IsValid())
 }
 
 func TestBuildMovieInfo_NotFound(t *testing.T) {

@@ -43,11 +43,19 @@ func TestFC2PPVDB_LiveProbe(t *testing.T) {
 
 	// Extract the data-page attribute (HTML-escaped JSON). Since the JSON is
 	// HTML-escaped (&quot;), there are no raw double quotes inside the value,
-	// so a plain [^"]* match is safe.
-	match := regexp.MustCompile(`data-page="([^"]*)"`).FindSubmatch(body)
-	require.NotNil(t, match, "data-page attribute not found in live page")
-
-	dataPage := strings.ReplaceAll(string(match[1]), "&quot;", `"`)
+	// so a plain [^"]* match is safe. The live page carries several data-page
+	// attributes (<body> holds the Laravel route name), so keep the first
+	// value that is a JSON object.
+	matches := regexp.MustCompile(`data-page="([^"]*)"`).FindAllSubmatch(body, -1)
+	require.NotEmpty(t, matches, "data-page attribute not found in live page")
+	var dataPage string
+	for _, m := range matches {
+		if v := strings.ReplaceAll(string(m[1]), "&quot;", `"`); strings.HasPrefix(v, "{") {
+			dataPage = v
+			break
+		}
+	}
+	require.NotEmpty(t, dataPage, "no JSON data-page attribute found in live page")
 	t.Logf("data-page size=%d", len(dataPage))
 
 	var raw struct {
