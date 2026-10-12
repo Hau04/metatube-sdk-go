@@ -13,8 +13,9 @@ import (
 
 // SearchPageParser implements a search page parser for FANZA.
 type SearchPageParser struct {
-	vm   *otto.Otto
-	data string
+	vm      *otto.Otto
+	data    string
+	scripts []string // raw script snippets for fallback extraction.
 }
 
 func NewSearchPageParser() *SearchPageParser {
@@ -27,11 +28,27 @@ func NewSearchPageParser() *SearchPageParser {
 }
 
 func (p *SearchPageParser) LoadJSCode(code string) error {
+	p.scripts = append(p.scripts, code)
 	_, err := p.vm.Run(code)
 	return err
 }
 
 func (p *SearchPageParser) process() error {
+	err := p.processVM()
+	if err == nil {
+		return nil
+	}
+	// Fallback: extract the flight payloads directly from the raw script
+	// text without evaluating them. This covers pages whose inline scripts
+	// cannot be executed as a whole by the JS runtime (e.g. unsupported
+	// syntax), while `self.__next_f.push([idx, "..."])` chunks are intact.
+	if p.processRawScripts() == nil {
+		return nil
+	}
+	return err // report the original failure reason.
+}
+
+func (p *SearchPageParser) processVM() error {
 	self, err := p.vm.Get("self")
 	if err != nil {
 		return fmt.Errorf("get var `self` from runtime: %w", err)
@@ -81,6 +98,35 @@ func (p *SearchPageParser) process() error {
 		}
 	}
 
+	if sb.Len() == 0 {
+		return fmt.Errorf("var `self.__next_f` contains no flight data: %#v", object["__next_f"])
+	}
+
+	p.data = sb.String()
+	return nil
+}
+
+// nextFPushRegexp matches `self.__next_f.push([idx, "..."])` flight chunks
+// embedded in inline scripts.
+var nextFPushRegexp = regexp.MustCompile(`__next_f\.push\(\[\s*(\d+)\s*,\s*("(?:[^"\\]|\\.)*")\s*\]\)`)
+
+func (p *SearchPageParser) processRawScripts() error {
+	sb := &strings.Builder{}
+	for _, code := range p.scripts {
+		for _, m := range nextFPushRegexp.FindAllStringSubmatch(code, -1) {
+			if m[1] != "1" /* targeted index */ {
+				continue
+			}
+			var val string
+			if err := json.Unmarshal([]byte(m[2]), &val); err != nil {
+				continue // skip undecodable payloads
+			}
+			sb.WriteString(val)
+		}
+	}
+	if sb.Len() == 0 {
+		return fmt.Errorf("no `self.__next_f` flight payloads found in %d script(s)", len(p.scripts))
+	}
 	p.data = sb.String()
 	return nil
 }
@@ -141,6 +187,10 @@ func (p *SearchPageParser) Parse(resp *ResponseWrapper) error {
 
 	if err := scanner.Err(); err != nil {
 		return err
+	}
+
+	if len(jsonContent) == 0 {
+		return fmt.Errorf("backendResponse not found in flight data (%d bytes)", len(p.data))
 	}
 
 	return json.Unmarshal(jsonContent, &resp)

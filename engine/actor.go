@@ -129,7 +129,11 @@ func (e *Engine) SearchActorAll(keyword string, fallback bool) (results []*model
 						mu.Unlock()
 					}
 				}
-			} // ignore error
+			} else if !goerr.Is(innerErr, mt.ErrInfoNotFound) {
+				// log unexpected errors so actor search gaps are diagnosable.
+				e.logger.Printf("SearchActor failed: provider=%s keyword=%s err=%v",
+					provider.Name(), keyword, innerErr)
+			} // ignore InfoNotFound (normal miss)
 		}(provider)
 	}
 	wg.Wait()
@@ -151,6 +155,12 @@ func (e *Engine) getActorInfoFromDB(provider mt.ActorProvider, id string) (*mode
 }
 
 func (e *Engine) getActorInfoWithCallback(provider mt.ActorProvider, id string, lazy bool, callback func() (*model.ActorInfo, error)) (info *model.ActorInfo, err error) {
+	defer func() {
+		// log the failure cause so provider issues are diagnosable.
+		if err != nil {
+			e.logger.Printf("GetActorInfo failed: provider=%s id=%s err=%v", provider.Name(), id, err)
+		}
+	}()
 	defer func() {
 		// metadata validation check.
 		if err == nil && (info == nil || !info.IsValid()) {

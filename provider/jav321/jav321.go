@@ -1,12 +1,15 @@
 package jav321
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gocolly/colly/v2"
@@ -36,16 +39,85 @@ const (
 	searchURL = "https://www.jav321.com/search"
 )
 
+const (
+	// maxRequestTimeout caps per-request timeouts so a dead origin cannot
+	// stall multi-provider search on every request.
+	maxRequestTimeout = 5 * time.Second
+	// failureCooldown is how long the provider stays disabled after a
+	// transient failure (timeout or 5xx).
+	failureCooldown = 2 * time.Minute
+)
+
 type JAV321 struct {
 	*scraper.Scraper
+
+	mu        sync.Mutex
+	downUntil time.Time
+	lastErr   error
 }
 
 func New() *JAV321 {
-	return &JAV321{scraper.NewDefaultScraper(Name, baseURL, Priority, language.Japanese)}
+	return &JAV321{Scraper: scraper.NewDefaultScraper(Name, baseURL, Priority, language.Japanese)}
 }
 
-func (jav *JAV321) SetRequestTimeout(_ time.Duration) {
-	jav.Scraper.SetRequestTimeout(10 * time.Second)
+// SetRequestTimeout sets the per-request timeout, clamped to
+// maxRequestTimeout regardless of the requested value.
+func (jav *JAV321) SetRequestTimeout(timeout time.Duration) {
+	if timeout <= 0 || timeout > maxRequestTimeout {
+		timeout = maxRequestTimeout
+	}
+	jav.Scraper.SetRequestTimeout(timeout)
+}
+
+// begin reports whether a remote call may proceed. After a transient failure
+// the provider is skipped for failureCooldown so one dead upstream cannot
+// hold up every all-providers query.
+func (jav *JAV321) begin() error {
+	jav.mu.Lock()
+	defer jav.mu.Unlock()
+	if time.Now().Before(jav.downUntil) {
+		return fmt.Errorf("jav321 temporarily disabled after failure: %w", jav.lastErr)
+	}
+	return nil
+}
+
+// finish records the outcome of a remote call and trips the temporary
+// disable switch on transient failures.
+func (jav *JAV321) finish(err error) {
+	jav.mu.Lock()
+	defer jav.mu.Unlock()
+	if isTransientError(err) {
+		jav.downUntil = time.Now().Add(failureCooldown)
+		jav.lastErr = err
+		return
+	}
+	jav.downUntil = time.Time{}
+	jav.lastErr = nil
+}
+
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := err.Error()
+	if msg == "" /* e.g. non-standard status like 522 has no status text */ {
+		return true
+	}
+	switch msg {
+	case http.StatusText(http.StatusInternalServerError),
+		http.StatusText(http.StatusBadGateway),
+		http.StatusText(http.StatusServiceUnavailable),
+		http.StatusText(http.StatusGatewayTimeout):
+		return true
+	}
+	return strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "upstream status 5")
 }
 
 func (jav *JAV321) GetMovieInfoByID(id string) (info *model.MovieInfo, err error) {
@@ -61,6 +133,11 @@ func (jav *JAV321) ParseMovieIDFromURL(rawURL string) (string, error) {
 }
 
 func (jav *JAV321) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, err error) {
+	if err = jav.begin(); err != nil {
+		return nil, err
+	}
+	defer func() { jav.finish(err) }()
+
 	id, err := jav.ParseMovieIDFromURL(rawURL)
 	if err != nil {
 		return
@@ -214,12 +291,17 @@ func (jav *JAV321) GetMovieInfoByURL(rawURL string) (info *model.MovieInfo, err 
 
 func (jav *JAV321) NormalizeMovieKeyword(keyword string) string {
 	if number.IsSpecial(keyword) && !regexp.MustCompile(`^(?i)([a-z]{1,4}\d{2,4}|heyzo[-_].+)$`).MatchString(keyword) {
-		return "" // JavBus has no those special contents.
+		return "" // JAV321 has no those special contents.
 	}
 	return strings.ToUpper(keyword)
 }
 
 func (jav *JAV321) SearchMovie(keyword string) (results []*model.MovieSearchResult, err error) {
+	if err = jav.begin(); err != nil {
+		return nil, err
+	}
+	defer func() { jav.finish(err) }()
+
 	c := jav.ClonedCollector()
 	c.ParseHTTPErrorResponse = true
 	c.SetRedirectHandler(func(req *http.Request, via []*http.Request) error {
@@ -227,6 +309,10 @@ func (jav *JAV321) SearchMovie(keyword string) (results []*model.MovieSearchResu
 	})
 
 	c.OnResponse(func(r *colly.Response) {
+		if r.StatusCode >= 500 {
+			err = fmt.Errorf("search failed with upstream status %d", r.StatusCode)
+			return
+		}
 		var loc *url.URL
 		if loc, err = url.Parse(r.Request.AbsoluteURL(r.Headers.Get("Location"))); err != nil {
 			return

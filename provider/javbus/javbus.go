@@ -54,7 +54,10 @@ func New() *JavBus {
 				"Referer": baseURL,
 			}),
 			scraper.WithCookies(baseURL, []*http.Cookie{
+				// dv=1: required since 2026-10, without it detail pages
+				// redirect/interstitial and scraping yields empty metadata.
 				// existmag=all
+				{Name: "dv", Value: "1"},
 				{Name: "existmag", Value: "all"},
 			})),
 	}
