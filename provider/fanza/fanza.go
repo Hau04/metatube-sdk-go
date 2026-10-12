@@ -63,8 +63,9 @@ const (
 const regionNotAvailable = "not-available-in-your-region"
 
 var (
-	errContentIDNotFound = errors.New("content-id-not-found")
-	errRequireNewHandler = errors.New("require-new-handler")
+	errContentIDNotFound  = errors.New("content-id-not-found")
+	errRequireNewHandler  = errors.New("require-new-handler")
+	errAgeCheckNotCleared = errors.New("age check interstitial not bypassed")
 
 	ErrRegionNotAvailable = errors.New(regionNotAvailable)
 )
@@ -559,12 +560,17 @@ func (fz *FANZA) getMonoMovieInfoByURL(rawURL string) (info *model.MovieInfo, er
 	})
 
 	c.OnScraped(func(r *colly.Response) {
-		if !info.IsValid() && isRegionError(r) {
-			err = ErrRegionNotAvailable
+		if !info.IsValid() {
+			switch {
+			case isRegionError(r):
+				err = ErrRegionNotAvailable
+			case isAgeCheckPage(r):
+				err = errAgeCheckNotCleared
+			}
 		}
 	})
 
-	vErr := c.Visit(info.Homepage)
+	vErr := fz.visitWithAgeCheck(c, info.Homepage)
 	if vErr != nil {
 		var urlErr *url.Error
 		if errors.As(vErr, &urlErr) && errors.Is(urlErr.Err, errRequireNewHandler) {
@@ -608,7 +614,23 @@ func (fz *FANZA) searchMovieNext(keyword string) (results []*model.MovieSearchRe
 		_ = p.LoadJSCode(e.Text)
 	})
 
-	if err = c.Visit(fmt.Sprintf(searchURL, url.QueryEscape(keyword))); err != nil {
+	// Detect interstitial pages (age check / region block) that carry no
+	// search data at all, and report them explicitly.
+	var pageErr error
+	c.OnScraped(func(r *colly.Response) {
+		switch {
+		case isRegionError(r):
+			pageErr = ErrRegionNotAvailable
+		case isAgeCheckPage(r):
+			pageErr = errAgeCheckNotCleared
+		}
+	})
+
+	if err = fz.visitWithAgeCheck(c, fmt.Sprintf(searchURL, url.QueryEscape(keyword))); err != nil {
+		return
+	}
+	if pageErr != nil /* interstitial page instead of search results */ {
+		err = pageErr
 		return
 	}
 
@@ -845,6 +867,30 @@ func isRegionError(r *colly.Response) bool {
 		return true
 	}
 	return false
+}
+
+func isAgeCheckPage(r *colly.Response) bool {
+	return strings.Contains(r.Request.URL.Path, "age_check")
+}
+
+// ageCheckDeclaredURL accepts FANZA's age verification and redirects back to
+// the target URL, setting the age cookies in the (shared) collector cookie jar.
+const ageCheckDeclaredURL = "https://www.dmm.co.jp/age_check/=/declared=yes/?rurl=%s"
+
+// visitWithAgeCheck visits rawURL through FANZA's age-check gate so requests
+// work regardless of the exact age cookie name/shape. It falls back to a
+// direct visit if the age-check endpoint is unavailable.
+func (fz *FANZA) visitWithAgeCheck(c *colly.Collector, rawURL string) error {
+	err := c.Visit(fmt.Sprintf(ageCheckDeclaredURL, url.QueryEscape(rawURL)))
+	if err == nil {
+		return nil
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && errors.Is(urlErr.Err, errRequireNewHandler) {
+		return err // mono -> digital handler jump, do not retry.
+	}
+	// Fall back to a direct visit if the age-check endpoint misbehaves.
+	return c.Visit(rawURL)
 }
 
 func (fz *FANZA) parseScoreFromURL(s string) float64 {

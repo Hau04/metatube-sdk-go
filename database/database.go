@@ -78,7 +78,7 @@ func Open(cfg *Config) (*gorm.DB, error) {
 			logger.Config{
 				SlowThreshold:             100 * time.Millisecond,
 				LogLevel:                  cfg.LogLevel,
-				IgnoreRecordNotFoundError: false,
+				IgnoreRecordNotFoundError: true,
 				ParameterizedQueries:      false,
 				Colorful:                  false,
 			}),

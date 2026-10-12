@@ -209,6 +209,12 @@ func (e *Engine) getMovieInfoFromDB(provider mt.MovieProvider, id string) (*mode
 
 func (e *Engine) getMovieInfoWithCallback(provider mt.MovieProvider, id string, lazy bool, callback func() (*model.MovieInfo, error)) (info *model.MovieInfo, err error) {
 	defer func() {
+		// log the failure cause so provider issues are diagnosable.
+		if err != nil {
+			e.logger.Printf("GetMovieInfo failed: provider=%s id=%s err=%v", provider.Name(), id, err)
+		}
+	}()
+	defer func() {
 		// metadata validation check.
 		if err == nil && (info == nil || !info.IsValid()) {
 			err = mt.ErrIncompleteMetadata
