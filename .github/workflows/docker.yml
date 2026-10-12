@@ -47,6 +47,7 @@ jobs:
         id: shell
         run: |
           echo "version=$(git describe --abbrev=0 --tags HEAD | cut -d'v' -f 2)" >> $GITHUB_OUTPUT
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Build and Push (dev)
         if: github.ref == 'refs/heads/main'
@@ -57,7 +58,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/metatube-server:dev
+            ghcr.io/${{ steps.shell.outputs.owner }}/metatube-server:dev
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -70,7 +71,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/metatube-server:latest
-            ghcr.io/${{ github.repository_owner }}/metatube-server:${{ steps.shell.outputs.version }}
+            ghcr.io/${{ steps.shell.outputs.owner }}/metatube-server:latest
+            ghcr.io/${{ steps.shell.outputs.owner }}/metatube-server:${{ steps.shell.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
